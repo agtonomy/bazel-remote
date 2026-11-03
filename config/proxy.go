@@ -5,14 +5,18 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
+	"github.com/buchgr/bazel-remote/v2/cache"
 	"github.com/buchgr/bazel-remote/v2/cache/azblobproxy"
 	"github.com/buchgr/bazel-remote/v2/cache/gcsproxy"
 	"github.com/buchgr/bazel-remote/v2/cache/grpcproxy"
 	"github.com/buchgr/bazel-remote/v2/cache/httpproxy"
+	"github.com/buchgr/bazel-remote/v2/cache/multiproxy"
 	"github.com/buchgr/bazel-remote/v2/cache/s3proxy"
 	"github.com/buchgr/bazel-remote/v2/utils/credentialhelper"
 	"github.com/minio/minio-go/v7"
@@ -50,32 +54,110 @@ func getTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
 }
 
 func (c *Config) setProxy() error {
-	if c.GoogleCloudStorage != nil {
-		proxyCache, err := gcsproxy.New(c.GoogleCloudStorage.Bucket,
-			c.GoogleCloudStorage.UseDefaultCredentials, c.GoogleCloudStorage.JSONCredentialsFile,
-			c.StorageMode, c.AccessLogger, c.ErrorLogger, c.NumUploaders, c.MaxQueuedUploads)
+	b := proxyBuilder{c: c}
+
+	if len(c.Proxies) == 0 {
+		single := c.singleProxyConfig()
+		if single.count() == 0 {
+			return nil
+		}
+
+		proxy, err := b.newProxy(single, false)
 		if err != nil {
 			return err
 		}
 
-		c.ProxyBackend = proxyCache
+		c.ProxyBackend = proxy
 		return nil
 	}
 
-	if c.GRPCBackend != nil {
+	var backends []multiproxy.Backend
+	for i := range c.Proxies {
+		p := &c.Proxies[i]
+
+		proxy, err := b.newProxy(p, true)
+		if err != nil {
+			return fmt.Errorf("failed to set up %s: %w", p.name(), err)
+		}
+
+		backends = append(backends, multiproxy.Backend{
+			Name:     p.name(),
+			Proxy:    proxy,
+			ReadOnly: p.ReadOnly,
+		})
+	}
+
+	proxy, err := multiproxy.New(backends, c.ErrorLogger)
+	if err != nil {
+		return err
+	}
+
+	c.ProxyBackend = proxy
+	return nil
+}
+
+// How long to wait at startup when checking the capabilities of a grpc
+// backend in the "proxies" list, before treating it as unavailable.
+// A variable so that tests can override it.
+var capabilitiesCheckTimeout = 10 * time.Second
+
+type proxyBuilder struct {
+	c *Config
+
+	// Shared by all grpc proxy backends, since metrics can only be
+	// registered once.
+	grpcMetrics *grpc_prometheus.ClientMetrics
+}
+
+func (b *proxyBuilder) getGRPCMetrics() (*grpc_prometheus.ClientMetrics, error) {
+	if b.grpcMetrics != nil {
+		return b.grpcMetrics, nil
+	}
+
+	metrics := grpc_prometheus.NewClientMetrics(func(o *prom.CounterOpts) { o.Namespace = "proxy" })
+	metrics.EnableClientHandlingTimeHistogram(func(o *prom.HistogramOpts) { o.Namespace = "proxy" })
+	err := prom.Register(metrics)
+	if err != nil {
+		return nil, err
+	}
+
+	b.grpcMetrics = metrics
+	return metrics, nil
+}
+
+// newProxy creates the proxy backend configured by p. If tolerateUnavailable
+// is true, then a grpc proxy backend which cannot be reached at startup is
+// logged instead of being treated as an error.
+func (b *proxyBuilder) newProxy(p *ProxyConfig, tolerateUnavailable bool) (cache.Proxy, error) {
+	c := b.c
+
+	// Read-only backends are never uploaded to, so don't start uploaders
+	// or allocate an upload queue for them.
+	numUploaders, maxQueuedUploads := c.NumUploaders, c.MaxQueuedUploads
+	if p.ReadOnly {
+		numUploaders, maxQueuedUploads = 0, 0
+	}
+
+	if p.GoogleCloudStorage != nil {
+		return gcsproxy.New(p.GoogleCloudStorage.Bucket,
+			p.GoogleCloudStorage.UseDefaultCredentials, p.GoogleCloudStorage.JSONCredentialsFile,
+			c.StorageMode, c.AccessLogger, c.ErrorLogger, numUploaders, maxQueuedUploads)
+	}
+
+	if p.GRPCBackend != nil {
 		var opts []grpc.DialOption
-		if c.GRPCBackend.BaseURL.Scheme == "grpcs" {
-			config, err := getTLSConfig(c.GRPCBackend.CertFile, c.GRPCBackend.KeyFile, c.GRPCBackend.CaFile)
+		if p.GRPCBackend.BaseURL.Scheme == "grpcs" {
+			config, err := getTLSConfig(p.GRPCBackend.CertFile, p.GRPCBackend.KeyFile, p.GRPCBackend.CaFile)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			creds := credentials.NewTLS(config)
 			opts = append(opts, grpc.WithTransportCredentials(creds))
 		} else {
 			opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		}
-		if password, ok := c.GRPCBackend.BaseURL.User.Password(); ok {
-			username := c.GRPCBackend.BaseURL.User.Username()
+		if password, ok := p.GRPCBackend.BaseURL.User.Password(); ok {
+			username := p.GRPCBackend.BaseURL.User.Username()
 			auth := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", username, password)))
 			header := fmt.Sprintf("Basic %s", auth)
 			unaryAuth := func(ctx context.Context, method string, req, res interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
@@ -86,109 +168,115 @@ func (c *Config) setProxy() error {
 			}
 			opts = append(opts, grpc.WithChainUnaryInterceptor(unaryAuth), grpc.WithStreamInterceptor(streamAuth))
 		}
-		if c.GRPCBackend.CredentialHelper != "" {
-			helper, err := credentialhelper.New(c.GRPCBackend.CredentialHelper)
+		if p.GRPCBackend.CredentialHelper != "" {
+			helper, err := credentialhelper.New(p.GRPCBackend.CredentialHelper)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			opts = append(opts, grpc.WithPerRPCCredentials(helper.PerRPCCredentials()))
 		}
 
-		metrics := grpc_prometheus.NewClientMetrics(func(o *prom.CounterOpts) { o.Namespace = "proxy" })
-		metrics.EnableClientHandlingTimeHistogram(func(o *prom.HistogramOpts) { o.Namespace = "proxy" })
-		err := prom.Register(metrics)
+		metrics, err := b.getGRPCMetrics()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		opts = append(opts, grpc.WithChainStreamInterceptor(metrics.StreamClientInterceptor()))
 		opts = append(opts, grpc.WithChainUnaryInterceptor(metrics.UnaryClientInterceptor()))
 
-		conn, err := grpc.NewClient(c.GRPCBackend.BaseURL.Host, opts...)
+		conn, err := grpc.NewClient(p.GRPCBackend.BaseURL.Host, opts...)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		clients := grpcproxy.NewGrpcClients(conn)
-		err = clients.CheckCapabilities(c.StorageMode == "zstd")
-		if err != nil {
-			return err
-		}
-		proxy := grpcproxy.New(clients, c.StorageMode,
-			c.AccessLogger, c.ErrorLogger, c.NumUploaders, c.MaxQueuedUploads)
 
-		c.ProxyBackend = proxy
+		// Don't let a backend which is unreachable (e.g. packets silently
+		// dropped) hold up startup for long, when it is allowed to be
+		// unavailable.
+		ctx := context.Background()
+		if tolerateUnavailable {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, capabilitiesCheckTimeout)
+			defer cancel()
+		}
+
+		err = clients.CheckCapabilities(ctx, c.StorageMode == "zstd", !p.ReadOnly)
+		if err != nil {
+			// An incompatible backend is a configuration error, but one
+			// which is unavailable might come back later.
+			if !tolerateUnavailable || errors.Is(err, grpcproxy.ErrIncompatibleBackend) {
+				return nil, err
+			}
+			c.ErrorLogger.Printf("WARNING: failed to check the capabilities of %s, continuing since it may become available later: %v",
+				p.name(), err)
+		}
+
+		return grpcproxy.New(clients, c.StorageMode,
+			c.AccessLogger, c.ErrorLogger, numUploaders, maxQueuedUploads), nil
 	}
 
-	if c.HTTPBackend != nil {
+	if p.HTTPBackend != nil {
 		httpClient := &http.Client{}
-		if c.HTTPBackend.BaseURL.Scheme == "https" {
-			config, err := getTLSConfig(c.HTTPBackend.CertFile, c.HTTPBackend.KeyFile, c.HTTPBackend.CaFile)
+		if p.HTTPBackend.BaseURL.Scheme == "https" {
+			config, err := getTLSConfig(p.HTTPBackend.CertFile, p.HTTPBackend.KeyFile, p.HTTPBackend.CaFile)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			tr := &http.Transport{TLSClientConfig: config}
 			httpClient.Transport = tr
 		}
-		if c.HTTPBackend.CredentialHelper != "" {
-			helper, err := credentialhelper.New(c.HTTPBackend.CredentialHelper)
+		if p.HTTPBackend.CredentialHelper != "" {
+			helper, err := credentialhelper.New(p.HTTPBackend.CredentialHelper)
 			if err != nil {
-				return err
+				return nil, err
 			}
-			httpClient.Transport = helper.HTTPTransport(c.HTTPBackend.BaseURL.String(), httpClient.Transport)
+			httpClient.Transport = helper.HTTPTransport(p.HTTPBackend.BaseURL.String(), httpClient.Transport)
 		}
 
-		proxyCache, err := httpproxy.New(c.HTTPBackend.BaseURL, c.StorageMode,
-			httpClient, c.AccessLogger, c.ErrorLogger, c.NumUploaders, c.MaxQueuedUploads)
-		if err != nil {
-			return err
-		}
-
-		c.ProxyBackend = proxyCache
-		return nil
+		return httpproxy.New(p.HTTPBackend.BaseURL, c.StorageMode,
+			httpClient, c.AccessLogger, c.ErrorLogger, numUploaders, maxQueuedUploads)
 	}
 
-	if c.S3CloudStorage != nil {
-		creds, err := c.S3CloudStorage.GetCredentials()
+	if p.S3CloudStorage != nil {
+		creds, err := p.S3CloudStorage.GetCredentials()
 		if err != nil {
-			return err
+			return nil, err
 		}
 
-		bucketLookupType, err := parseBucketLookupType(c.S3CloudStorage.BucketLookupType)
+		bucketLookupType, err := parseBucketLookupType(p.S3CloudStorage.BucketLookupType)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		c.ProxyBackend = s3proxy.New(
-			c.S3CloudStorage.Endpoint,
-			c.S3CloudStorage.Bucket,
+		return s3proxy.New(
+			p.S3CloudStorage.Endpoint,
+			p.S3CloudStorage.Bucket,
 			bucketLookupType,
-			c.S3CloudStorage.Prefix,
+			p.S3CloudStorage.Prefix,
 			creds,
-			c.S3CloudStorage.DisableSSL,
-			c.S3CloudStorage.UpdateTimestamps,
-			c.S3CloudStorage.Region,
-			c.S3CloudStorage.MaxIdleConns,
-			c.StorageMode, c.AccessLogger, c.ErrorLogger, c.NumUploaders, c.MaxQueuedUploads)
-		return nil
+			p.S3CloudStorage.DisableSSL,
+			p.S3CloudStorage.UpdateTimestamps,
+			p.S3CloudStorage.Region,
+			p.S3CloudStorage.MaxIdleConns,
+			c.StorageMode, c.AccessLogger, c.ErrorLogger, numUploaders, maxQueuedUploads), nil
 	}
 
-	if c.AzBlobConfig != nil {
-		creds, err := c.AzBlobConfig.GetCredentials()
+	if p.AzBlobConfig != nil {
+		creds, err := p.AzBlobConfig.GetCredentials()
 		if err != nil {
-			return err
+			return nil, err
 		}
 
-		c.ProxyBackend = azblobproxy.New(
-			c.AzBlobConfig.StorageAccount,
-			c.AzBlobConfig.ContainerName,
-			c.AzBlobConfig.Prefix,
+		return azblobproxy.New(
+			p.AzBlobConfig.StorageAccount,
+			p.AzBlobConfig.ContainerName,
+			p.AzBlobConfig.Prefix,
 			creds,
-			c.AzBlobConfig.SharedKey,
-			c.AzBlobConfig.UpdateTimestamps,
-			c.StorageMode, c.AccessLogger, c.ErrorLogger, c.NumUploaders, c.MaxQueuedUploads,
-		)
-		return nil
+			p.AzBlobConfig.SharedKey,
+			p.AzBlobConfig.UpdateTimestamps,
+			c.StorageMode, c.AccessLogger, c.ErrorLogger, numUploaders, maxQueuedUploads,
+		), nil
 	}
 
-	return nil
+	return nil, errors.New("no proxy backend configured")
 }
 
 func parseBucketLookupType(typeStr string) (minio.BucketLookupType, error) {

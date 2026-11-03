@@ -16,8 +16,6 @@ import (
 	"time"
 
 	"github.com/buchgr/bazel-remote/v2/cache"
-	"github.com/buchgr/bazel-remote/v2/cache/azblobproxy"
-	"github.com/buchgr/bazel-remote/v2/cache/s3proxy"
 
 	"github.com/urfave/cli/v2"
 	yaml "gopkg.in/yaml.v3"
@@ -126,6 +124,7 @@ type Config struct {
 	GoogleCloudStorage          *GoogleCloudStorageConfig `yaml:"gcs_proxy,omitempty"`
 	HTTPBackend                 *URLBackendConfig         `yaml:"http_proxy,omitempty"`
 	GRPCBackend                 *URLBackendConfig         `yaml:"grpc_proxy,omitempty"`
+	Proxies                     []ProxyConfig             `yaml:"proxies,omitempty"`
 	NumUploaders                int                       `yaml:"num_uploaders"`
 	MaxQueuedUploads            int                       `yaml:"max_queued_uploads"`
 	IdleTimeout                 time.Duration             `yaml:"idle_timeout"`
@@ -328,25 +327,9 @@ func validateConfig(c *Config) error {
 		return errors.New("zstd_implementation must be set to either \"go\" or \"cgo\", got: " + c.ZstdImplementation)
 	}
 
-	proxyCount := 0
-	if c.S3CloudStorage != nil {
-		proxyCount++
-	}
-	if c.HTTPBackend != nil {
-		proxyCount++
-	}
-	if c.GoogleCloudStorage != nil {
-		proxyCount++
-	}
-	if c.AzBlobConfig != nil {
-		proxyCount++
-	}
-	if c.GRPCBackend != nil {
-		proxyCount++
-	}
-
-	if proxyCount > 1 {
-		return errors.New("at most one of the S3/GCS/HTTP proxy backends is allowed")
+	err := c.validateProxies()
+	if err != nil {
+		return err
 	}
 
 	var httpPort string
@@ -412,65 +395,6 @@ func validateConfig(c *Config) error {
 
 	if c.MaxProxyBlobSize <= 0 {
 		return errors.New("the 'max_proxy_blob_size' flag/key must be a positive integer")
-	}
-
-	if c.GoogleCloudStorage != nil && c.HTTPBackend != nil && c.S3CloudStorage != nil {
-		return errors.New("one can specify at most one proxying backend")
-	}
-
-	if c.GoogleCloudStorage != nil {
-		if c.GoogleCloudStorage.Bucket == "" {
-			return errors.New("the 'bucket' field is required for 'gcs_proxy'")
-		}
-	}
-
-	if c.HTTPBackend != nil {
-		if err := c.HTTPBackend.validate("http"); err != nil {
-			return err
-		}
-	}
-
-	if c.GRPCBackend != nil {
-		if err := c.GRPCBackend.validate("grpc"); err != nil {
-			return err
-		}
-	}
-
-	if c.S3CloudStorage != nil {
-		if !s3proxy.IsValidAuthMethod(c.S3CloudStorage.AuthMethod) {
-			return fmt.Errorf("invalid s3.auth_method: %s", c.S3CloudStorage.AuthMethod)
-		}
-
-		if c.S3CloudStorage.KeyVersion != nil && *c.S3CloudStorage.KeyVersion != 2 {
-			return fmt.Errorf("s3.key_version (deprecated) must be 2, found %d", c.S3CloudStorage.KeyVersion)
-		}
-
-		if c.S3CloudStorage.BucketLookupType != "" && c.S3CloudStorage.BucketLookupType != "auto" &&
-			c.S3CloudStorage.BucketLookupType != "dns" && c.S3CloudStorage.BucketLookupType != "path" {
-			return fmt.Errorf("s3.bucket_lookup_type must be one of: \"auto\", \"dns\", \"path\" or empty/unspecified, found: \"%s\"",
-				c.S3CloudStorage.BucketLookupType)
-		}
-
-		if c.S3CloudStorage.SignatureType != "" && c.S3CloudStorage.SignatureType != "v2" &&
-			c.S3CloudStorage.SignatureType != "v4" && c.S3CloudStorage.SignatureType != "v4streaming" &&
-			c.S3CloudStorage.SignatureType != "anonymous" {
-			return fmt.Errorf("s3.signature_type must be one of: \"v2\", \"v4\", \"v4streaming\", \"anonymous\" or empty/unspecified, found: \"%s\"",
-				c.S3CloudStorage.SignatureType)
-		}
-	}
-
-	if c.AzBlobConfig != nil {
-		if c.AzBlobConfig.StorageAccount == "" {
-			return errors.New("the 'storage_account' field is required for 'azblob_proxy'")
-		}
-
-		if c.AzBlobConfig.ContainerName == "" {
-			return errors.New("the 'container_name' field is required for 'azblob_proxy'")
-		}
-
-		if !azblobproxy.IsValidAuthMethod(c.AzBlobConfig.AuthMethod) {
-			return fmt.Errorf("invalid azblob.auth_method: %s", c.AzBlobConfig.AuthMethod)
-		}
 	}
 
 	if c.MetricsDurationBuckets != nil {

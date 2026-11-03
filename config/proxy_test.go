@@ -20,6 +20,9 @@ import (
 type capabilitiesServer struct {
 	pb.UnimplementedCapabilitiesServer
 
+	// Whether to report that action cache updates are not allowed.
+	readOnly bool
+
 	mu   sync.Mutex
 	auth []string
 }
@@ -35,7 +38,7 @@ func (s *capabilitiesServer) GetCapabilities(ctx context.Context, req *pb.GetCap
 		CacheCapabilities: &pb.CacheCapabilities{
 			DigestFunctions: []pb.DigestFunction_Value{pb.DigestFunction_SHA256},
 			ActionCacheUpdateCapabilities: &pb.ActionCacheUpdateCapabilities{
-				UpdateEnabled: true,
+				UpdateEnabled: !s.readOnly,
 			},
 		},
 	}, nil

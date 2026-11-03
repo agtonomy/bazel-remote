@@ -1,0 +1,16 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "go_default_library",
+    srcs = ["multiproxy.go"],
+    importpath = "github.com/buchgr/bazel-remote/v2/cache/multiproxy",
+    visibility = ["//visibility:public"],
+    deps = ["//cache:go_default_library"],
+)
+
+go_test(
+    name = "go_default_test",
+    srcs = ["multiproxy_test.go"],
+    embed = [":go_default_library"],
+    deps = ["//cache:go_default_library"],
+)

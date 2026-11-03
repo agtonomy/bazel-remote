@@ -56,19 +56,28 @@ func NewGrpcClients(cc *grpc.ClientConn) *GrpcClients {
 	}
 }
 
-func (c *GrpcClients) CheckCapabilities(zstd bool) error {
-	resp, err := c.cap.GetCapabilities(context.Background(), &pb.GetCapabilitiesRequest{})
+// ErrIncompatibleBackend is wrapped by errors returned from
+// CheckCapabilities when the backend does not support the features that
+// bazel-remote requires, as opposed to when the backend could not be reached.
+var ErrIncompatibleBackend = errors.New("incompatible grpc proxy backend")
+
+// CheckCapabilities verifies that the backend supports the features that
+// bazel-remote requires. Action cache updates are only required if
+// requireUpdates is true.
+func (c *GrpcClients) CheckCapabilities(ctx context.Context, zstd bool, requireUpdates bool) error {
+	resp, err := c.cap.GetCapabilities(ctx, &pb.GetCapabilitiesRequest{})
 	if err != nil {
 		return err
 	}
-	if !resp.CacheCapabilities.ActionCacheUpdateCapabilities.UpdateEnabled {
-		return errors.New("proxy backend does not allow action cache updates")
+	caps := resp.GetCacheCapabilities()
+	if requireUpdates && !caps.GetActionCacheUpdateCapabilities().GetUpdateEnabled() {
+		return fmt.Errorf("%w: proxy backend does not allow action cache updates", ErrIncompatibleBackend)
 	}
-	if !contains(resp.CacheCapabilities.DigestFunctions, pb.DigestFunction_SHA256) {
-		return errors.New("proxy backend does not support sha256")
+	if !contains(caps.GetDigestFunctions(), pb.DigestFunction_SHA256) {
+		return fmt.Errorf("%w: proxy backend does not support sha256", ErrIncompatibleBackend)
 	}
-	if zstd && !contains(resp.CacheCapabilities.SupportedCompressors, pb.Compressor_ZSTD) {
-		return errors.New("compression required but the grpc proxy does not support it")
+	if zstd && !contains(caps.GetSupportedCompressors(), pb.Compressor_ZSTD) {
+		return fmt.Errorf("%w: compression required but the grpc proxy does not support it", ErrIncompatibleBackend)
 	}
 	return nil
 }
@@ -249,7 +258,8 @@ func (r *remoteGrpcProxyCache) fetchBlobDigest(ctx context.Context, hash string)
 	}
 
 	if res.Status.GetCode() == int32(codes.NotFound) {
-		return nil, errors.New("not found")
+		// A cache miss, not an error.
+		return nil, nil
 	}
 	if res.Status.GetCode() != int32(codes.OK) {
 		return nil, errors.New(res.Status.Message)
@@ -298,6 +308,10 @@ func (r *remoteGrpcProxyCache) Get(ctx context.Context, kind cache.EntryKind, ha
 				logResponse(r.errorLogger, "Fetch", err.Error(), kind, hash)
 				return nil, -1, err
 			}
+			if digest == nil {
+				logResponse(r.accessLogger, "Fetch", "Not Found", kind, hash)
+				return nil, -1, nil
+			}
 			size = digest.SizeBytes
 		}
 
@@ -313,8 +327,28 @@ func (r *remoteGrpcProxyCache) Get(ctx context.Context, kind cache.EntryKind, ha
 			logResponse(r.errorLogger, "Read", err.Error(), kind, hash)
 			return nil, -1, err
 		}
+
+		// Read is a server-streaming RPC, so errors such as NotFound are
+		// only returned when receiving the first message. Wait for it, so
+		// that misses are reported as such rather than as a failure while
+		// reading the blob.
+		first, err := stream.Recv()
+		if err == io.EOF {
+			// An empty blob.
+			_ = stream.CloseSend()
+			return io.NopCloser(bytes.NewReader(nil)), size, nil
+		}
+		if status.Code(err) == codes.NotFound {
+			logResponse(r.accessLogger, "Read", "Not Found", kind, hash)
+			return nil, -1, nil
+		}
+		if err != nil {
+			logResponse(r.errorLogger, "Read", err.Error(), kind, hash)
+			return nil, -1, err
+		}
+
 		logResponse(r.errorLogger, "Read", "Completed", kind, hash)
-		rc := StreamReadCloser[*bs.ReadResponse]{Stream: stream}
+		rc := StreamReadCloser[*bs.ReadResponse]{Stream: stream, buf: first.GetData()}
 		return &rc, size, nil
 	default:
 		return nil, -1, fmt.Errorf("unexpected kind %s", kind)
@@ -343,6 +377,10 @@ func (r *remoteGrpcProxyCache) Contains(ctx context.Context, kind cache.EntryKin
 			digest, err := r.fetchBlobDigest(ctx, hash)
 			if err != nil {
 				logResponse(r.errorLogger, "Contains", err.Error(), kind, hash)
+				return false, -1
+			}
+			if digest == nil {
+				logResponse(r.accessLogger, "Contains", "Not Found", kind, hash)
 				return false, -1
 			}
 			logResponse(r.accessLogger, "Contains", "Success", kind, hash)

@@ -20,7 +20,9 @@ import (
 	"github.com/buchgr/bazel-remote/v2/server"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 
@@ -73,7 +75,7 @@ func newProxy(t *testing.T, dir string, storageMode string) *testProxy {
 		t.Fatal(err)
 	}
 	clients := NewGrpcClients(cc)
-	err = clients.CheckCapabilities(storageMode == "zstd")
+	err = clients.CheckCapabilities(context.Background(), storageMode == "zstd", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,6 +151,9 @@ func (p *testProxy) Read(req *bs.ReadRequest, resp bs.ByteStream_ReadServer) err
 	parts := strings.Split(req.ResourceName, "/")
 	hash := parts[len(parts)-2]
 	f, err := os.Open(filepath.Join(p.dir, cache.CAS.DirName(), hash))
+	if os.IsNotExist(err) {
+		return status.Error(codes.NotFound, "not found")
+	}
 	if err != nil {
 		return err
 	}
@@ -156,6 +161,9 @@ func (p *testProxy) Read(req *bs.ReadRequest, resp bs.ByteStream_ReadServer) err
 	data, err := io.ReadAll(f)
 	if err != nil {
 		return err
+	}
+	if len(data) == 0 {
+		return nil
 	}
 	err = resp.Send(&bs.ReadResponse{Data: data[:len(data)/2]})
 	if err != nil {
@@ -373,6 +381,71 @@ func runTest(t *testing.T, storageMode string) {
 
 	if len(received) != len(data) {
 		t.Fatal("Unexpected blob size")
+	}
+}
+
+func TestGetCAS(t *testing.T) {
+	p := newProxy(t, testutils.TempDir(t), "uncompressed")
+	defer p.server.Stop()
+
+	casDir := filepath.Join(p.dir, cache.CAS.DirName())
+	err := os.MkdirAll(casDir, 0755)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data := []byte("some blob data")
+	present := fmt.Sprintf("%x", sha256.Sum256(data))
+	err = os.WriteFile(filepath.Join(casDir, present), data, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	empty := fmt.Sprintf("%x", sha256.Sum256(nil))
+	err = os.WriteFile(filepath.Join(casDir, empty), nil, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	rc, size, err := p.proxy.Get(ctx, cache.CAS, present, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc == nil || size != int64(len(data)) {
+		t.Fatalf("expected a hit of size %d, got %v %d", len(data), rc, size)
+	}
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = rc.Close()
+	if !bytes.Equal(got, data) {
+		t.Fatalf("expected %q, got %q", data, got)
+	}
+
+	rc, size, err = p.proxy.Get(ctx, cache.CAS, empty, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc == nil || size != 0 {
+		t.Fatalf("expected an empty hit, got %v %d", rc, size)
+	}
+	got, err = io.ReadAll(rc)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("expected no data, got %q %v", got, err)
+	}
+	_ = rc.Close()
+
+	// A missing blob is a miss, not an error.
+	missing := fmt.Sprintf("%x", sha256.Sum256([]byte("missing")))
+	rc, size, err = p.proxy.Get(ctx, cache.CAS, missing, 7)
+	if err != nil {
+		t.Fatalf("expected no error for a missing blob, got %v", err)
+	}
+	if rc != nil || size != -1 {
+		t.Fatalf("expected a miss, got %v %d", rc, size)
 	}
 }
 

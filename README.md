@@ -654,6 +654,26 @@ http_address: 0.0.0.0:8080
 #  auth_method: environment_credential
 #
 #  auth_method: default
+#
+# Instead of one of the proxy backends above, a list of proxy backends can
+# be configured. Each entry takes the same settings as the corresponding
+# top-level key. Reads try each backend in order, and use the first hit.
+# Uploads only go to the backend which does not have read_only set, if any
+# (at most one backend may be writable). A backend which returns errors is
+# skipped for a short while, and a grpc backend which cannot be reached at
+# startup is logged as a warning instead of preventing startup.
+#proxies:
+#  - read_only: true
+#    grpc_proxy:
+#      url: grpcs://cache-a.example.com:443
+#  - read_only: true
+#    grpc_proxy:
+#      url: grpcs://cache-b.example.com:443
+#      credential_helper: bazel-credential-nsc
+#  - s3_proxy:
+#      endpoint: minio.example.com:9000
+#      bucket: my-bucket
+#      auth_method: iam_role
   
 # If set to a valid port number, then serve /debug/pprof/* URLs here:
 #profile_port: 7070
