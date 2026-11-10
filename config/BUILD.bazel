@@ -19,6 +19,7 @@ go_library(
         "//cache/grpcproxy:go_default_library",
         "//cache/httpproxy:go_default_library",
         "//cache/s3proxy:go_default_library",
+        "//utils/credentialhelper:go_default_library",
         "@com_github_azure_azure_sdk_for_go_sdk_azcore//:go_default_library",
         "@com_github_azure_azure_sdk_for_go_sdk_azidentity//:go_default_library",
         "@com_github_grpc_ecosystem_go_grpc_prometheus//:go_default_library",
@@ -36,7 +37,16 @@ go_library(
 
 go_test(
     name = "go_default_test",
-    srcs = ["config_test.go"],
+    srcs = [
+        "config_test.go",
+        "proxy_test.go",
+    ],
     embed = [":go_default_library"],
-    deps = ["@com_github_google_go_cmp//cmp:go_default_library"],
+    deps = [
+        "//genproto/build/bazel/remote/execution/v2:go_default_library",
+        "@com_github_google_go_cmp//cmp:go_default_library",
+        "@com_github_prometheus_client_golang//prometheus:go_default_library",
+        "@org_golang_google_grpc//:go_default_library",
+        "@org_golang_google_grpc//metadata:go_default_library",
+    ],
 )

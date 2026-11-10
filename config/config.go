@@ -36,6 +36,10 @@ type URLBackendConfig struct {
 	CertFile string   `yaml:"cert_file"`
 	KeyFile  string   `yaml:"key_file"`
 	CaFile   string   `yaml:"ca_file"`
+
+	// Path to a binary implementing the Bazel credential helper protocol,
+	// used to get headers to authenticate requests to the proxy backend.
+	CredentialHelper string `yaml:"credential_helper"`
 }
 
 type LDAPConfig struct {
@@ -53,10 +57,11 @@ type LDAPConfig struct {
 // be silently ignored.
 func (c *URLBackendConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	var raw struct {
-		URL      string `yaml:"url"`
-		CertFile string `yaml:"cert_file"`
-		KeyFile  string `yaml:"key_file"`
-		CaFile   string `yaml:"ca_file"`
+		URL              string `yaml:"url"`
+		CertFile         string `yaml:"cert_file"`
+		KeyFile          string `yaml:"key_file"`
+		CaFile           string `yaml:"ca_file"`
+		CredentialHelper string `yaml:"credential_helper"`
 	}
 	if err := unmarshal(&raw); err != nil {
 		return err
@@ -66,10 +71,11 @@ func (c *URLBackendConfig) UnmarshalYAML(unmarshal func(interface{}) error) erro
 		return err
 	}
 	*c = URLBackendConfig{
-		BaseURL:  u,
-		CertFile: raw.CertFile,
-		KeyFile:  raw.KeyFile,
-		CaFile:   raw.CaFile,
+		BaseURL:          u,
+		CertFile:         raw.CertFile,
+		KeyFile:          raw.KeyFile,
+		CaFile:           raw.CaFile,
+		CredentialHelper: raw.CredentialHelper,
 	}
 	return nil
 }
@@ -90,7 +96,10 @@ func (c *URLBackendConfig) validate(protocol string) error {
 		}
 	}
 	if c.CaFile != "" && c.BaseURL.Scheme != protocol+"s" {
-		return fmt.Errorf("when TLS is enabled, the %[1]s proxy backend protocol must be %[1]s", protocol)
+		return fmt.Errorf("when TLS is enabled, the %[1]s proxy backend protocol must be %[1]ss", protocol)
+	}
+	if c.CredentialHelper != "" && c.BaseURL.User != nil {
+		return fmt.Errorf("the %[1]s proxy backend url must not contain credentials when '%[1]s_proxy.credential_helper' is used", protocol)
 	}
 	return nil
 }
@@ -593,6 +602,8 @@ func get(ctx *cli.Context) (*Config, error) {
 			KeyFile:  ctx.String("http_proxy.key_file"),
 			CertFile: ctx.String("http_proxy.cert_file"),
 			CaFile:   ctx.String("http_proxy.ca_file"),
+
+			CredentialHelper: ctx.String("http_proxy.credential_helper"),
 		}
 	}
 
@@ -608,6 +619,8 @@ func get(ctx *cli.Context) (*Config, error) {
 			KeyFile:  ctx.String("grpc_proxy.key_file"),
 			CertFile: ctx.String("grpc_proxy.cert_file"),
 			CaFile:   ctx.String("grpc_proxy.ca_file"),
+
+			CredentialHelper: ctx.String("grpc_proxy.credential_helper"),
 		}
 	}
 

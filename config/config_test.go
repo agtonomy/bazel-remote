@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"math"
 	"net/url"
 	"reflect"
@@ -217,6 +218,51 @@ http_proxy:
 
 	if !cmp.Equal(config.HTTPBackend, expected) {
 		t.Fatalf("Expected '%+v' but got '%+v'", expected, config.HTTPBackend)
+	}
+}
+
+func TestProxyCredentialHelperConfig(t *testing.T) {
+	for _, protocol := range []string{"http", "grpc"} {
+		t.Run(protocol, func(t *testing.T) {
+			yaml := fmt.Sprintf(`dir: /opt/cache-dir
+max_size: 100
+%[1]s_proxy:
+  url: %[1]ss://remote-cache.com:8080
+  credential_helper: /usr/bin/bazel-credential-helper
+  ca_file: /etc/ca.pem
+`, protocol)
+			config, err := NewFromYaml([]byte(yaml))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			backend := config.HTTPBackend
+			if protocol == "grpc" {
+				backend = config.GRPCBackend
+			}
+			if backend == nil {
+				t.Fatalf("expected a %s proxy backend", protocol)
+			}
+			if backend.CredentialHelper != "/usr/bin/bazel-credential-helper" {
+				t.Fatalf("unexpected credential helper: %q", backend.CredentialHelper)
+			}
+			if backend.CaFile != "/etc/ca.pem" {
+				t.Fatalf("unexpected ca_file: %q", backend.CaFile)
+			}
+			if backend.BaseURL == nil || backend.BaseURL.Host != "remote-cache.com:8080" {
+				t.Fatalf("unexpected url: %v", backend.BaseURL)
+			}
+
+			// Credentials in the URL conflict with the credential helper.
+			yaml = strings.Replace(yaml, "://remote-cache.com", "://user:pass@remote-cache.com", 1)
+			_, err = NewFromYaml([]byte(yaml))
+			if err == nil {
+				t.Fatal("expected an error when the url contains credentials")
+			}
+			if !strings.Contains(err.Error(), "credential_helper") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
 	}
 }
 

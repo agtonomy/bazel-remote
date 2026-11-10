@@ -231,6 +231,12 @@ func GetCliFlags() []cli.Flag {
 			EnvVars: []string{"BAZEL_REMOTE_GRPC_PROXY_CA_FILE"},
 		},
 		&cli.StringFlag{
+			Name:    "grpc_proxy.credential_helper",
+			Value:   "",
+			Usage:   "Path to a Bazel credential helper binary used to get headers to authenticate with the grpc proxy backend, e.g. bazel-credential-nsc. If the path contains no slashes it is looked up in $PATH.",
+			EnvVars: []string{"BAZEL_REMOTE_GRPC_PROXY_CREDENTIAL_HELPER"},
+		},
+		&cli.StringFlag{
 			Name:    "http_proxy.url",
 			Value:   "",
 			Usage:   "The base URL to use for a http proxy backend.",
@@ -253,6 +259,12 @@ func GetCliFlags() []cli.Flag {
 			Value:   "",
 			Usage:   "Path to a certificate autority used to validate the http proxy backend certificate.",
 			EnvVars: []string{"BAZEL_REMOTE_HTTP_PROXY_CA_FILE"},
+		},
+		&cli.StringFlag{
+			Name:    "http_proxy.credential_helper",
+			Value:   "",
+			Usage:   "Path to a Bazel credential helper binary used to get headers to authenticate with the http proxy backend. If the path contains no slashes it is looked up in $PATH.",
+			EnvVars: []string{"BAZEL_REMOTE_HTTP_PROXY_CREDENTIAL_HELPER"},
 		},
 		&cli.StringFlag{
 			Name:    "gcs_proxy.bucket",

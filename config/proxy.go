@@ -14,6 +14,7 @@ import (
 	"github.com/buchgr/bazel-remote/v2/cache/grpcproxy"
 	"github.com/buchgr/bazel-remote/v2/cache/httpproxy"
 	"github.com/buchgr/bazel-remote/v2/cache/s3proxy"
+	"github.com/buchgr/bazel-remote/v2/utils/credentialhelper"
 	"github.com/minio/minio-go/v7"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -85,6 +86,13 @@ func (c *Config) setProxy() error {
 			}
 			opts = append(opts, grpc.WithChainUnaryInterceptor(unaryAuth), grpc.WithStreamInterceptor(streamAuth))
 		}
+		if c.GRPCBackend.CredentialHelper != "" {
+			helper, err := credentialhelper.New(c.GRPCBackend.CredentialHelper)
+			if err != nil {
+				return err
+			}
+			opts = append(opts, grpc.WithPerRPCCredentials(helper.PerRPCCredentials()))
+		}
 
 		metrics := grpc_prometheus.NewClientMetrics(func(o *prom.CounterOpts) { o.Namespace = "proxy" })
 		metrics.EnableClientHandlingTimeHistogram(func(o *prom.HistogramOpts) { o.Namespace = "proxy" })
@@ -119,6 +127,13 @@ func (c *Config) setProxy() error {
 			}
 			tr := &http.Transport{TLSClientConfig: config}
 			httpClient.Transport = tr
+		}
+		if c.HTTPBackend.CredentialHelper != "" {
+			helper, err := credentialhelper.New(c.HTTPBackend.CredentialHelper)
+			if err != nil {
+				return err
+			}
+			httpClient.Transport = helper.HTTPTransport(c.HTTPBackend.BaseURL.String(), httpClient.Transport)
 		}
 
 		proxyCache, err := httpproxy.New(c.HTTPBackend.BaseURL, c.StorageMode,

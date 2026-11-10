@@ -266,6 +266,11 @@ OPTIONS:
    --grpc_proxy.ca_file value Path to a certificate autority used to validate
       the grpc proxy backend certificate. [$BAZEL_REMOTE_GRPC_PROXY_CA_FILE]
 
+   --grpc_proxy.credential_helper value Path to a Bazel credential helper
+      binary used to get headers to authenticate with the grpc proxy backend,
+      e.g. bazel-credential-nsc. If the path contains no slashes it is looked up
+      in $PATH. [$BAZEL_REMOTE_GRPC_PROXY_CREDENTIAL_HELPER]
+
    --http_proxy.url value The base URL to use for a http proxy backend.
       [$BAZEL_REMOTE_HTTP_PROXY_URL]
 
@@ -281,6 +286,11 @@ OPTIONS:
 
    --http_proxy.ca_file value Path to a certificate autority used to validate
       the http proxy backend certificate. [$BAZEL_REMOTE_HTTP_PROXY_CA_FILE]
+
+   --http_proxy.credential_helper value Path to a Bazel credential helper
+      binary used to get headers to authenticate with the http proxy backend. If
+      the path contains no slashes it is looked up in $PATH.
+      [$BAZEL_REMOTE_HTTP_PROXY_CREDENTIAL_HELPER]
 
    --gcs_proxy.bucket value The bucket to use for the Google Cloud Storage
       proxy backend. [$BAZEL_REMOTE_GCS_BUCKET]
@@ -602,6 +612,8 @@ http_address: 0.0.0.0:8080
 #  key_file:  path/to/client.key
 # If you want to use a custom CA:
 #  ca_file: path/to/ca.crt
+# If you want to authenticate using a Bazel credential helper:
+#  credential_helper: path/to/credential-helper
 #
 # Note that the grpc proxy backend requires remote asset API support if
 # you want client -http-> bazel-remote -grpc-> backend requests to work.
@@ -612,6 +624,10 @@ http_address: 0.0.0.0:8080
 #  key_file:  path/to/client.key
 # If you want to use a custom CA:
 #  ca_file: path/to/ca.crt
+# If you want to authenticate using a Bazel credential helper, e.g. for
+# Namespace's Bazel cache (https://namespace.so/docs), using the grpcs://
+# endpoint from `nsc cache bazel setup -o json` as the url:
+#  credential_helper: bazel-credential-nsc
 #
 #azblob_proxy:
 #  tenant_id: TENANT_ID
